@@ -1,3 +1,9 @@
+NOTE: Forked from https://github.com/pdollar/edges
+
+
+Following README contents by Piotr Dollar:
+
+
 ###################################################################
 #                                                                 #
 #    Structured Edge Detection Toolbox V3.0                       #
