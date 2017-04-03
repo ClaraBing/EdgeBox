@@ -45,7 +45,8 @@ function bbs = edgeBoxes( I, model, varargin )
 %  model      - Structured Edge model trained with edgesTrain
 %  opts       - parameters (struct or name/value pairs)
 %   (1) main parameters, see above for details
-%   .name           - [] target filename (if specified return is 1)
+%   .name           - [] target filename (if specified return is 1) % Note (Bingbin): return is as normal
+%   .savename       - [] target filename to save bounding boxes (added by Bingbin)
 %   .alpha          - [.65] step size of sliding window search
 %   .beta           - [.75] nms threshold for object proposals
 %   .eta            - [1.0] adaptation rate for nms threshold (see arXiv15)
@@ -71,28 +72,136 @@ function bbs = edgeBoxes( I, model, varargin )
 % Code written by Piotr Dollar and Larry Zitnick, 2014.
 % Licensed under the MSR-LA Full Rights License [see license.txt]
 
+  fid = fopen('time-edgeBoxes.txt', 'w');
+
+  tic;
+
 % get default parameters (unimportant parameters are undocumented)
-dfs={'name','', 'alpha',.65, 'beta',.75, 'eta',1, 'minScore',.01, ...
-  'maxBoxes',1e4, 'edgeMinMag',.1, 'edgeMergeThr',.5,'clusterMinMag',.5,...
-  'maxAspectRatio',3, 'minBoxArea',1000, 'gamma',2, 'kappa',1.5 };
-o=getPrmDflt(varargin,dfs,1); if(nargin==0), bbs=o; return; end
+% Modified: added 'savename'
+  dfs={'name','', 'savename','', 'alpha',.65, 'beta',.75, 'eta',1, 'minScore', .01, ...
+    'maxBoxes',1e4, 'edgeMinMag',.1, 'edgeMergeThr',.5,'clusterMinMag',.5,...
+    'maxAspectRatio',3, 'minBoxArea',1000, 'gamma',2, 'kappa',1.5 };
+  o=getPrmDflt(varargin,dfs,1); if(nargin==0), bbs=o; return; end
 
-% run detector possibly over multiple images and optionally save results
-f=o.name; if(~isempty(f) && exist(f,'file')), bbs=1; return; end
-if(~iscell(I)), bbs=edgeBoxesImg(I,model,o); else n=length(I);
-  bbs=cell(n,1); parfor i=1:n, bbs{i}=edgeBoxesImg(I{i},model,o); end; end
-d=fileparts(f); if(~isempty(d)&&~exist(d,'dir')), mkdir(d); end
-if(~isempty(f)), save(f,'bbs'); bbs=1; end
+  fprintf(fid, sprintf('preparation time: %.3f', toc));
+  
+  tic;
 
+  % run detector possibly over multiple images and optionally save results
+  if(~iscell(I))
+    bbs=edgeBoxesImg(I,model,o, 0); % Modified by Bingbin: pass i
+  else
+    n=length(I);
+    bbs=cell(n,1);
+    imgs=cell(n,1);
+    parfor i=1:n
+      bbs{i} = edgeBoxesImg(I{i},model,o, i); % Modified by Bingbin: pass i
+      imgs{i} = I{i}; % image path
+%       if(size(bbs{i}, 1)) % debug
+%           disp(sprintf('size of bbs{%d}:', i));
+%           disp(size(bbs{i}));
+%       end
+    end
+  end
+
+  fprintf(fid, sprintf('total edgeBoxesImg time: %.3f', toc));
+
+  f=o.name;
+  if(~isempty(f) && exist(f,'file'))
+    disp(sprintf('edgeBoxes.m: file %s exists.\nWill overwrite.', f));
+%    bbs=1; return;
+  end
+  d=fileparts(f); if(~isempty(d)&&~exist(d,'dir')), mkdir(d); end
+  if(~isempty(f)), save(f,'bbs');
+    % Modified: return bbs as normal (i.e. not set to 1) & save boxes to mat file
+    % bbs=1;
+    disp(sprintf('bbs saved at %s', f));
+    thres = 0.05;
+    % disp(max(bbs(:,5)));
+
+    tic;
+    highly_scored = bbs(bbs(:, 5)>thres,:);
+    disp(size(highly_scored, 1));
+    fprintf(fid, sprintf('get highly_scored time: %.3f', toc));
+
+    tic;
+    boxes = horzcat(highly_scored(:,1), highly_scored(:,2), highly_scored(:,1)+highly_scored(:,3), highly_scored(:,2)+highly_scored(:,4), highly_scored(:,5));
+    % Modified: show bounding boxes on image
+%{
+    boxes_cell = cell(1,1); % Mark: unfinished
+    boxes_cell{1} = [boxes];
+    show_faster(I, boxes_cell);
+%}
+    % (Noted by Bingbin) It is an error if bounding box coordinates exceed the image boundary: 720 * 1280
+    assert(size(nonzeros(boxes(:,[1,3])>1280),1)==0); % for width
+    assert(size(nonzeros(boxes(:,[2,4])>720),1)==0); % for height
+
+    top500 = sortrows(boxes, -5);
+
+%    top500 = top500(1:500,:);
+    if size(boxes,1)>500
+      boxes = top500(1:500,:);
+      disp('limited to 500');
+    end
+
+%{
+    fsave = o.savename;
+    disp(fsave);
+    if (isempty(fsave))
+      fsave = 'edgeBoxes.mat';
+    end
+%}
+%    fsave = 'edgeBox-cat.mat';
+    fsave = o.savename;
+    save(fsave, 'boxes');
+
+% Save proposal boxes to txt file
+    fid = fopen(strcat(fsave, '.txt'), 'w');
+    disp(size(boxes,1)); disp(size(boxes,2));
+    for row = (1:size(boxes,1))
+      fprintf(fid, sprintf('%d,%d,%d,%d,%.5f\n',boxes(row,1), boxes(row,2), boxes(row,3), boxes(row,4), boxes(row,5) ));
+    end
+
+
+%    save('top500-scored.mat', 'top500');
+%    disp(sprintf('boxes scored over %d saved at %s', thres, fsave));
+  end
 end
 
-function bbs = edgeBoxesImg( I, model, o )
+function bbs = edgeBoxesImg( I, model, o, i)
+%  fid = fopen('time-edgeBoxesImg.txt', 'a');
 % Generate Edge Boxes object proposals in single image.
-if(all(ischar(I))), I=imread(I); end
-model.opts.nms=0; [E,O]=edgesDetect(I,model);
-if(0), E=gradientMag(convTri(single(I),4)); E=E/max(E(:)); end
-E=edgesNmsMex(E,O,2,0,1,model.opts.nThreads);
-bbs=edgeBoxesMex(E,O,o.alpha,o.beta,o.eta,o.minScore,o.maxBoxes,...
-  o.edgeMinMag,o.edgeMergeThr,o.clusterMinMag,...
-  o.maxAspectRatio,o.minBoxArea,o.gamma,o.kappa);
+  fname = I;
+  if(all(ischar(I)))
+      % disp(strcat('reading image: ', I));
+      I=imread(I);
+  end
+  model.opts.nms=0;
+  [E,O]=edgesDetect(I,model);
+  if(0), E=gradientMag(convTri(single(I),4));
+    E=E/max(E(:));
+  end
+% Note: edgesNmsMex.mexa64: compiled from 'private/edgesNmsMex.cpp'
+%  nmsTime=tic;
+  E=edgesNmsMex(E,O,2,0,1,model.opts.nThreads);
+%  fprintf(fid, sprintf('[edgeBoxesImg] [iter %d] time for edgesNmsMex: %.3f', i, toc(nmsTime)));
+% each row in bbs = 4 coordinates + score (i.e. 5 elems per row)
+% rows are sorted by the score, descending
+%  eBMTime=tic;
+  bbs=edgeBoxesMex(E,O,o.alpha,o.beta,o.eta,o.minScore,o.maxBoxes,...
+    o.edgeMinMag,o.edgeMergeThr,o.clusterMinMag,...
+    o.maxAspectRatio,o.minBoxArea,o.gamma,o.kappa);
+
+    if (size(bbs, 1) == 0)
+        disp(strcat('No boxes proposed for ', fname));
+    end
+%  disp('bbs size:');
+%  disp(size(bbs));
+%  tmp = bbs(1, :);
+%  disp('bbs(1} size:');
+%  disp(size(tmp));
+%  disp('tmp: ');
+%  disp(tmp);
+%  disp('tmp(1,:):');
+%  disp(tmp(1,:));
 end
